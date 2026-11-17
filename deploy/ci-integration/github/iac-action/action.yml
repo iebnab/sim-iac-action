@@ -1,0 +1,118 @@
+# The customer-side IaC and CI Action: assess one declared Terraform root (class iac) or
+# the repository's own workflow files (class ci) on the runner, and upload the results
+# only, through the CI ingest principal (the job's GitHub OIDC token).
+#
+# Nothing of the Terraform source, the state, a plan or a workflow file leaves the
+# runner: the results builder (libs/iac, vendored with this action at the same commit)
+# keeps rule ids, addresses, locations and attribute names, and ingest refuses anything
+# else. Every tool is pinned: Trivy 0.72.0 and OpenTofu 1.13.9 by sha256, zizmor 1.32.0
+# and PyYAML 6.0.2 by wheel hash, every Action by full commit SHA.
+#
+# Refs: docs/guides/iac-ci-setup.md, docs/architecture/adrs/0108-iac-and-ci-assessment.md.
+name: iac-ci-results
+description: Assess a declared Terraform root or the repository workflows and upload results only
+inputs:
+  class:
+    description: "iac (one declared Terraform root) or ci (the repository's workflows)"
+    required: true
+  root:
+    description: The declared root's path in the repository (class iac)
+    required: false
+    default: ""
+  ingest-url:
+    description: The platform's ingest base URL
+    required: true
+  ingest-audience:
+    description: The audience registered for this workflow's CI principal
+    required: true
+  ruleset-file:
+    description: Optional JSON of the main ruleset, for the pr-scan requirement (class ci)
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      with:
+        version: "0.9.5"
+        enable-cache: false
+    - name: Install pinned tools
+      shell: bash
+      env:
+        CLASS: ${{ inputs.class }}
+        TRIVY_SHA256: bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea
+        TOFU_SHA256: b34b327cc1ef07178207b6f2cd1f5276537d3e5b7be316500f6dac50d4c0a857
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        bin="${RUNNER_TEMP}/iac-ci-bin"
+        mkdir -p "$bin"
+        if [ "$CLASS" = iac ]; then
+          curl -fsSL -o "${RUNNER_TEMP}/trivy.tar.gz" \
+            "https://github.com/aquasecurity/trivy/releases/download/v0.72.0/trivy_0.72.0_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  ${RUNNER_TEMP}/trivy.tar.gz" | sha256sum -c -
+          tar -xzf "${RUNNER_TEMP}/trivy.tar.gz" -C "$bin" trivy
+          curl -fsSL -o "${RUNNER_TEMP}/tofu.tar.gz" \
+            "https://github.com/opentofu/opentofu/releases/download/v1.13.9/tofu_1.13.9_linux_amd64.tar.gz"
+          echo "${TOFU_SHA256}  ${RUNNER_TEMP}/tofu.tar.gz" | sha256sum -c -
+          tar -xzf "${RUNNER_TEMP}/tofu.tar.gz" -C "$bin" tofu
+        else
+          uv venv --quiet "${RUNNER_TEMP}/zizmor-venv"
+          VIRTUAL_ENV="${RUNNER_TEMP}/zizmor-venv" uv pip install --quiet --require-hashes \
+            -r "${ACTION_PATH}/zizmor-requirements.txt"
+          ln -sf "${RUNNER_TEMP}/zizmor-venv/bin/zizmor" "$bin/zizmor"
+        fi
+        echo "$bin" >> "$GITHUB_PATH"
+    - name: Assess (results files only)
+      shell: bash
+      env:
+        CLASS: ${{ inputs.class }}
+        ROOT: ${{ inputs.root }}
+        RULESET: ${{ inputs.ruleset-file }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        out="${RUNNER_TEMP}/iac-ci-out"
+        mkdir -p "$out"
+        platform="$(cd "${ACTION_PATH}/../../../.." && pwd)"
+        if [ "$CLASS" = iac ]; then
+          "${ACTION_PATH}/plan.sh" "$ROOT" "$out"
+          . "$out/status.env"
+          PYTHONPATH="$platform" uv run --quiet --no-project --python 3.13 --with-requirements \
+            "${ACTION_PATH}/builder-requirements.txt" --module libs.iac.cli iac \
+            --root "$ROOT" --trivy "$out/trivy.json" --trivy-status "$TRIVY_STATUS" \
+            --plan "$out/plan.json" --plan-status "$PLAN_STATUS" --out "$out/results.json"
+          rm -f "$out/plan.json" "$out/trivy.json"
+        else
+          zstatus=ok
+          rc=0
+          zizmor --format json --no-progress .github/workflows >"$out/zizmor.json" 2>/dev/null \
+            || rc=$?
+          # zizmor exits 0 with no finding and 10 to 14 with findings; anything else failed.
+          if [ "$rc" -ne 0 ] && { [ "$rc" -lt 10 ] || [ "$rc" -gt 14 ]; }; then
+            zstatus=error
+          fi
+          ruleset_args=()
+          if [ -n "$RULESET" ]; then ruleset_args=(--ruleset "$RULESET"); fi
+          PYTHONPATH="$platform" uv run --quiet --no-project --python 3.13 --with-requirements \
+            "${ACTION_PATH}/builder-requirements.txt" --module libs.iac.cli ci \
+            --workflows .github/workflows --zizmor "$out/zizmor.json" \
+            --zizmor-status "$zstatus" "${ruleset_args[@]}" --out "$out/results.json"
+          rm -f "$out/zizmor.json"
+        fi
+    - name: Upload through the CI ingest principal
+      shell: bash
+      env:
+        INGEST_URL: ${{ inputs.ingest-url }}
+        INGEST_AUDIENCE: ${{ inputs.ingest-audience }}
+      run: |
+        set -euo pipefail
+        out="${RUNNER_TEMP}/iac-ci-out"
+        token="$(curl -fsS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+          "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${INGEST_AUDIENCE}" | jq -r .value)"
+        echo "::add-mask::${token}"
+        curl -fsS -o "$out/accepted.json" -X POST "${INGEST_URL}/api/ingest/ci/iac" \
+          -H "Authorization: Bearer ${token}" -H "Content-Type: application/json" \
+          --data-binary "@$out/results.json"
+        jq -r '"accepted: scan \(.scan_id), \(.results) results"' "$out/accepted.json"
+        rm -f "$out/results.json"
