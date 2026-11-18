@@ -237,10 +237,10 @@ def assess_upload(upload: IacUpload, registered: Iterable[str], *, subject: str)
             reached.update(owned)
             continue
         gaps.extend({"rule": r, "reason": reason} for r in owned)
-    findings = {}
+    findings: dict[str, TransientIacFinding] = {}
     for r in upload.results:
-        tool = _owner_tool(r["rule"])
-        if tool not in ok_tools or tool not in _CLASS_TOOLS[upload.class_]:
+        owner = _owner_tool(r["rule"])
+        if owner not in ok_tools or owner not in _CLASS_TOOLS[upload.class_]:
             continue
         f = TransientIacFinding(
             r["rule"],

@@ -38,7 +38,10 @@ from libs.iac.upload import (
     TOOL_TRIVY,
     TOOL_ZIZMOR,
 )
-from libs.iac.workflow_rules import assess_publish_requires_scan
+from libs.iac.workflow_rules import RULE_PUBLISH_REQUIRES_SCAN, assess_publish_requires_scan
+
+# The one reviewed exception of the assess-only gate: (rule, workflow file name).
+GATE_EXCEPTION = ("ci:zizmor:dangerous-triggers", "pr-scan.yml")
 
 
 def _load(path: str | None, status: str) -> tuple[object, str]:
@@ -105,6 +108,24 @@ def _read_workflows(directory: Path) -> dict:
     return out
 
 
+def gate_failures(doc: dict) -> list[str]:
+    """The lines that fail an assess-only `ci` run: a tool that did not run clean, and
+    every zizmor or `ci:publish_requires_scan` result except the one reviewed exception
+    (the dangerous-triggers audit on `pr-scan.yml`, which is `pull_request_target` by
+    design). Rule ids and locations only. Pure."""
+    failures = [
+        f"tool {t['name']} status {t['status']}" for t in doc["tools"] if t["status"] != "ok"
+    ]
+    for r in doc["results"]:
+        rule, location = r["rule"], r["location"]
+        if rule != RULE_PUBLISH_REQUIRES_SCAN and not rule.startswith("ci:zizmor:"):
+            continue
+        if (rule, location.partition(":")[0].rpartition("/")[2]) == GATE_EXCEPTION:
+            continue
+        failures.append(f"{rule} {r['address']} {location}".strip())
+    return failures
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="iac-ci-results")
     sub = p.add_subparsers(dest="class_", required=True)
@@ -121,6 +142,11 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--zizmor-status", default="ok")
     c.add_argument("--ruleset")
     c.add_argument("--out", required=True)
+    c.add_argument(
+        "--gate",
+        action="store_true",
+        help="exit 1 on any zizmor or ci:publish_requires_scan finding (assess-only run)",
+    )
     a = p.parse_args(argv)
     if a.class_ == CLASS_IAC:
         trivy, ts = _load(a.trivy, a.trivy_status)
@@ -133,6 +159,11 @@ def main(argv: list[str] | None = None) -> int:
     Path(a.out).write_text(json.dumps(doc, sort_keys=True))
     statuses = ",".join(f"{t['name']}={t['status']}" for t in doc["tools"])
     print(f"{a.class_}: {len(doc['results'])} results ({statuses})", file=sys.stderr)
+    if getattr(a, "gate", False):
+        failures = gate_failures(doc)
+        for line in failures:
+            print(f"gate: {line}", file=sys.stderr)
+        return 1 if failures else 0
     return 0
 
 

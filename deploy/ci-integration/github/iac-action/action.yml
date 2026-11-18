@@ -20,15 +20,28 @@ inputs:
     required: false
     default: ""
   ingest-url:
-    description: The platform's ingest base URL
-    required: true
+    description: The platform's ingest base URL (not used when assess-only)
+    required: false
+    default: ""
   ingest-audience:
-    description: The audience registered for this workflow's CI principal
-    required: true
+    description: The audience registered for this workflow's CI principal (not used when assess-only)
+    required: false
+    default: ""
   ruleset-file:
     description: Optional JSON of the main ruleset, for the pr-scan requirement (class ci)
     required: false
     default: ""
+  workflows-dir:
+    description: The workflow directory to assess (class ci)
+    required: false
+    default: .github/workflows
+  assess-only:
+    description: >-
+      "true" assesses without uploading and fails the step on any zizmor or
+      ci:publish_requires_scan finding except the dangerous-triggers audit on pr-scan.yml
+      (class ci only; the calling job needs no id-token and holds no credential)
+    required: false
+    default: "false"
 runs:
   using: composite
   steps:
@@ -69,12 +82,18 @@ runs:
         CLASS: ${{ inputs.class }}
         ROOT: ${{ inputs.root }}
         RULESET: ${{ inputs.ruleset-file }}
+        WORKFLOWS_DIR: ${{ inputs.workflows-dir }}
+        ASSESS_ONLY: ${{ inputs.assess-only }}
         ACTION_PATH: ${{ github.action_path }}
       run: |
         set -euo pipefail
         out="${RUNNER_TEMP}/iac-ci-out"
         mkdir -p "$out"
         platform="$(cd "${ACTION_PATH}/../../../.." && pwd)"
+        if [ "$ASSESS_ONLY" = true ] && [ "$CLASS" != ci ]; then
+          echo "assess-only applies to class ci only" >&2
+          exit 1
+        fi
         if [ "$CLASS" = iac ]; then
           "${ACTION_PATH}/plan.sh" "$ROOT" "$out"
           . "$out/status.env"
@@ -86,7 +105,7 @@ runs:
         else
           zstatus=ok
           rc=0
-          zizmor --format json --no-progress .github/workflows >"$out/zizmor.json" 2>/dev/null \
+          zizmor --format json --no-progress "$WORKFLOWS_DIR" >"$out/zizmor.json" 2>/dev/null \
             || rc=$?
           # zizmor exits 0 with no finding and 10 to 14 with findings; anything else failed.
           if [ "$rc" -ne 0 ] && { [ "$rc" -lt 10 ] || [ "$rc" -gt 14 ]; }; then
@@ -94,13 +113,17 @@ runs:
           fi
           ruleset_args=()
           if [ -n "$RULESET" ]; then ruleset_args=(--ruleset "$RULESET"); fi
+          gate_args=()
+          if [ "$ASSESS_ONLY" = true ]; then gate_args=(--gate); fi
           PYTHONPATH="$platform" uv run --quiet --no-project --python 3.13 --with-requirements \
             "${ACTION_PATH}/builder-requirements.txt" --module libs.iac.cli ci \
-            --workflows .github/workflows --zizmor "$out/zizmor.json" \
-            --zizmor-status "$zstatus" "${ruleset_args[@]}" --out "$out/results.json"
+            --workflows "$WORKFLOWS_DIR" --zizmor "$out/zizmor.json" \
+            --zizmor-status "$zstatus" "${ruleset_args[@]}" "${gate_args[@]}" \
+            --out "$out/results.json"
           rm -f "$out/zizmor.json"
         fi
     - name: Upload through the CI ingest principal
+      if: inputs.assess-only != 'true'
       shell: bash
       env:
         INGEST_URL: ${{ inputs.ingest-url }}

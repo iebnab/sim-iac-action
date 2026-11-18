@@ -66,13 +66,16 @@ def trivy_config_results(doc: Mapping) -> list[dict[str, Any]]:
     return out
 
 
+def _mapping(value: object) -> Mapping:
+    return value if isinstance(value, Mapping) else {}
+
+
 def _changed_attributes(change: Mapping) -> list[str]:
     """Top-level attribute names whose before and after differ, or that are unknown
     after apply; the values themselves are compared here and dropped."""
-    before = change.get("before") if isinstance(change.get("before"), Mapping) else {}
-    after = change.get("after") if isinstance(change.get("after"), Mapping) else {}
-    unknown = change.get("after_unknown")
-    unknown = unknown if isinstance(unknown, Mapping) else {}
+    before = _mapping(change.get("before"))
+    after = _mapping(change.get("after"))
+    unknown = _mapping(change.get("after_unknown"))
     names = set(before) | set(after) | set(unknown)
     return sorted(n for n in names if before.get(n) != after.get(n) or unknown.get(n) is True)
 
