@@ -112,7 +112,7 @@ def _zizmor_location(finding: Mapping) -> str:
         symbolic = loc.get("symbolic") or {}
         key = symbolic.get("key") or {}
         local = key.get("Local") or {}
-        path = local.get("given_path") or local.get("prefix") or ""
+        path = local.get("verbatim_path") or ""
         concrete = (loc.get("concrete") or {}).get("location") or {}
         line = (concrete.get("start_point") or {}).get("row")
         if path:
