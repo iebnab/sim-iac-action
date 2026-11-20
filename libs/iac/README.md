@@ -1,5 +1,7 @@
 # libs/iac
 
+> **Status: IMPLEMENTED**
+
 Pure IaC and CI results code, imported by the platform (ingest, analysis) and run on the
 customer's runner by the IaC Action (`deploy/ci-integration/github/iac-action`).
 

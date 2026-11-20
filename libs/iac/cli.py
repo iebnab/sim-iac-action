@@ -3,15 +3,15 @@ from the tool outputs on the runner, never from source or state.
 
     uv run --no-project --with pyyaml==6.0.2 -m libs.iac.cli iac \
         --root envs/rehearsal --trivy trivy.json --trivy-status ok \
-        --plan plan.json --plan-status ok --out iac-results.json
+        --refresh refresh.json --plan plan.json --plan-status ok --out iac-results.json
     uv run --no-project --with pyyaml==6.0.2 -m libs.iac.cli ci \
         --workflows .github/workflows --zizmor zizmor.json --zizmor-status ok \
         [--ruleset ruleset.json] --out ci-results.json
 
-`--plan` is the output of `tofu show -json` over the plan's `-out` file; the plan file
-itself and the JSON stay on the runner, and nothing is printed but counts. A tool whose
-step failed is passed with status `error`, so the upload records a gap instead of a
-clean result.
+`--refresh` and `--plan` are `tofu show -json` outputs of a refresh-only plan and a
+normal plan respectively. Both files stay on the runner; nothing is printed but counts.
+A failed tool records a gap rather than a clean result. `--plan-status skipped` omits
+the plan tool for a never-applied root, leaving drift and divergence not assessed.
 """
 
 from __future__ import annotations
@@ -61,18 +61,23 @@ def _now() -> str:
     return datetime.datetime.now(datetime.UTC).isoformat()
 
 
-def build_iac(root: str, trivy: object, trivy_status: str, plan: object, plan_status: str):
+def build_iac(
+    root: str, trivy: object, trivy_status: str, refresh: object, plan: object, plan_status: str
+):
     results = []
     if trivy_status == "ok" and isinstance(trivy, dict):
         results += trivy_config_results(trivy)
-    if plan_status == "ok" and isinstance(plan, dict):
-        results += state_drift_results(plan) + divergence_results(plan)
+    if plan_status == "ok" and isinstance(refresh, dict) and isinstance(plan, dict):
+        results += state_drift_results(refresh) + divergence_results(plan)
+    tools = [_tool(TOOL_TRIVY, trivy_status)]
+    if plan_status != "skipped":
+        tools.append(_tool(TOOL_PLAN, plan_status))
     return {
         "schema": SCHEMA,
         "class": CLASS_IAC,
         "root": root,
         "collected_at": _now(),
-        "tools": [_tool(TOOL_TRIVY, trivy_status), _tool(TOOL_PLAN, plan_status)],
+        "tools": tools,
         "results": results,
     }
 
@@ -133,6 +138,7 @@ def main(argv: list[str] | None = None) -> int:
     i.add_argument("--root", required=True)
     i.add_argument("--trivy")
     i.add_argument("--trivy-status", default="ok")
+    i.add_argument("--refresh")
     i.add_argument("--plan")
     i.add_argument("--plan-status", default="ok")
     i.add_argument("--out", required=True)
@@ -150,8 +156,10 @@ def main(argv: list[str] | None = None) -> int:
     a = p.parse_args(argv)
     if a.class_ == CLASS_IAC:
         trivy, ts = _load(a.trivy, a.trivy_status)
+        refresh, rs = _load(a.refresh, a.plan_status)
         plan, ps = _load(a.plan, a.plan_status)
-        doc = build_iac(a.root, trivy, ts, plan, ps)
+        status = "skipped" if a.plan_status == "skipped" else "ok" if rs == ps == "ok" else "error"
+        doc = build_iac(a.root, trivy, ts, refresh, plan, status)
     else:
         zizmor, zs = _load(a.zizmor, a.zizmor_status)
         ruleset, _ = _load(a.ruleset, "ok") if a.ruleset else (None, "ok")

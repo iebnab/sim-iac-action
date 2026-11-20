@@ -1,41 +1,48 @@
 #!/usr/bin/env bash
 # Plan one declared Terraform root and scan it, writing results files only.
 #
-#   plan.sh <root dir> <out dir>
+#   plan.sh <root dir> <out dir> [plan|config-only]
 #
-# The plan goes to a file (`-out`) and is read only by `tofu show -json` into
-# <out>/plan.json, which the results builder reduces to addresses, actions and attribute
-# names. Nothing of the plan or of the tools' diagnostics is printed: the job log carries
-# only each step's status, because a plan can hold any value of the configuration or the
-# state. Locking stays on (`-lock=true`): the state lock object is taken and released on
-# the backend like any locked plan.
+# Two locked plans are kept locally: refresh-only observes changes since the recorded
+# state, and the ordinary plan compares declared configuration to the refreshed estate.
+# Neither plan is applied. Only the results builder reads their JSON; source, values
+# and tool diagnostics never enter the job log or upload.
 #
-# Writes <out>/status.env with TRIVY_STATUS and PLAN_STATUS (ok or error).
+# Writes <out>/status.env with TRIVY_STATUS and PLAN_STATUS (ok, error or skipped).
 set -uo pipefail
 
 root="$1"
 out="$2"
+mode="${3:-plan}"
 mkdir -p "$out"
 trivy_status=ok
-plan_status=ok
+plan_status=skipped
 
-if ! tofu -chdir="$root" init -input=false -lock=true -no-color >"$out/init.log" 2>&1; then
-  plan_status=error
-fi
-if [ "$plan_status" = ok ]; then
-  # -detailed-exitcode: 0 no changes, 2 changes, anything else a failed plan.
-  rc=0
-  tofu -chdir="$root" plan -input=false -lock=true -refresh=true -detailed-exitcode \
-    -no-color -out="$out/plan.bin" >"$out/plan.log" 2>&1 || rc=$?
-  if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then
+if [ "$mode" = plan ]; then
+  plan_status=ok
+  if ! tofu -chdir="$root" init -input=false -lock=true -no-color >"$out/init.log" 2>&1; then
     plan_status=error
   fi
+  for kind in refresh plan; do
+    if [ "$plan_status" != ok ]; then break; fi
+    args=()
+    if [ "$kind" = refresh ]; then args=(-refresh-only); fi
+    rc=0
+    tofu -chdir="$root" plan -input=false -lock=true -refresh=true -detailed-exitcode \
+      "${args[@]}" -no-color -out="$out/$kind.bin" >"$out/$kind.log" 2>&1 || rc=$?
+    if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then
+      plan_status=error
+    elif ! tofu -chdir="$root" show -json -no-color "$out/$kind.bin" \
+        >"$out/$kind.json" 2>"$out/show.log"; then
+      plan_status=error
+    fi
+  done
+elif [ "$mode" != config-only ]; then
+  echo "unknown plan mode" >&2
+  exit 2
 fi
-if [ "$plan_status" = ok ] && ! tofu -chdir="$root" show -json -no-color "$out/plan.bin" \
-    >"$out/plan.json" 2>"$out/show.log"; then
-  plan_status=error
-fi
-rm -f "$out/plan.bin" "$out/init.log" "$out/plan.log" "$out/show.log"
+rm -f "$out/refresh.bin" "$out/plan.bin" "$out/init.log" "$out/refresh.log" \
+  "$out/plan.log" "$out/show.log"
 
 if ! trivy config --quiet --format json --output "$out/trivy.json" "$root" \
     >/dev/null 2>"$out/trivy.log"; then

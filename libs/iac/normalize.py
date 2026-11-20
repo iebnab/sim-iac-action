@@ -8,11 +8,11 @@ attribute names come out of here.
 
 - `trivy_config_results`: `trivy config --format json` (Trivy 0.72.0), every FAIL
   misconfiguration as `iac:trivy:<ID>`.
-- `state_drift_results`: the plan's `resource_drift` (the live estate differs from the
-  recorded state: observed state drift), as `iac:drift`.
-- `divergence_results`: the plan's `resource_changes` other than no-op and read (the
-  declared configuration differs from the live estate: declared configuration
-  divergence), as `iac:divergence`.
+- `state_drift_results`: the refresh-only plan's `resource_drift` (the live estate
+  differs from recorded state: observed state drift), as `iac:drift`.
+- `divergence_results`: the normal plan's `resource_changes` other than no-op and read
+  (declared configuration differs from the refreshed live estate: declared
+  configuration divergence), as `iac:divergence`.
 - `zizmor_results`: `zizmor --format json`, every finding as `ci:zizmor:<ident>`.
 
 Pure: plain data in, plain data out.
